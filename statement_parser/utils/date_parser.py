@@ -5,7 +5,7 @@ from typing import Literal
 _DMY_FORMATS = [
     "%d/%m/%Y", "%d/%m/%y",
     "%d-%m-%Y", "%d-%m-%y",
-    "%d %b %Y", "%d-%b-%Y", "%d %b %y",
+    "%d %b %Y", "%d-%b-%Y", "%d %b %y", "%d-%b-%y",
     "%d %B %Y",
     "%d.%m.%Y",
 ]

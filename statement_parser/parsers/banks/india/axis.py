@@ -1,16 +1,16 @@
 """
 Axis Bank statement parser.
 
-Axis Bank uses two distinct table layouts depending on statement generation path:
+Axis Bank uses two distinct table layouts:
 
-  Format A (older / downloaded from net-banking PDF):
+  Format A (older / net-banking PDF):
     Tran Date | CHQNO | PARTICULARS | DR | CR | BAL
 
   Format B (newer / passbook-style):
     Date | Transaction Details | Chq/Ref No | Value Dt | Withdrawal (Dr) | Deposit (Cr) | Balance
 
-Both formats are handled — `_extract_transactions` tries Format A keywords first,
-then falls back to Format B keywords.
+Both are handled by a single grouped keyword definition — each tuple covers all
+known column name variants for that slot, so either format matches in one pass.
 """
 import logging
 import re
@@ -27,14 +27,13 @@ from statement_parser.utils.text import detect_payment_mode, extract_reference
 
 logger = logging.getLogger(__name__)
 
-# Format A: Tran Date | CHQNO | PARTICULARS | DR | CR | BAL
-_HEADER_KEYWORDS_A = ["tran date", "particulars", "dr", "cr"]
-
-# Format B: Date | Transaction Details | Chq/Ref No | Value Dt | Withdrawal (Dr) | Deposit (Cr) | Balance
-_HEADER_KEYWORDS_B = ["date", "withdrawal", "deposit", "balance"]
-
-# Minimal fallback — catches statements where only a few keywords are present
-_HEADER_KEYWORDS_C = ["date", "balance"]
+# Each tuple covers all known column name variants for that slot across both formats.
+# A row matches if it contains at least one word from each group.
+_HEADER_KEYWORDS: list[str | tuple[str, ...]] = [
+    ("date", "tran date"),                      # date column
+    ("dr", "debit", "withdrawal"),              # debit column
+    ("cr", "credit", "deposit"),               # credit column
+]
 
 
 class AxisParser(BaseParser):
@@ -50,11 +49,7 @@ class AxisParser(BaseParser):
                 continue
 
             for table in tables:
-                h = (
-                    self._find_header_row(table, _HEADER_KEYWORDS_A)
-                    or self._find_header_row(table, _HEADER_KEYWORDS_B)
-                    or self._find_header_row(table, _HEADER_KEYWORDS_C)
-                )
+                h = self._find_header_row(table, _HEADER_KEYWORDS)
                 if h is None:
                     logger.debug(
                         "No matching header in table on page %d — skipping. "
@@ -90,8 +85,14 @@ class AxisParser(BaseParser):
 
     def _extract_metadata(self, pdf: pdfplumber.PDF):
         text = self._full_text(pdf)
-        opening = self._find_amount_in_text(text, ["opening balance", "op bal"])
-        closing = self._find_amount_in_text(text, ["closing balance", "cl bal"])
+        opening = self._find_amount_in_text(text, ["opening balance", "opening bal", "op bal"])
+        closing = self._find_amount_in_text(text, ["closing balance", "closing bal", "cl bal"])
+
+        # Axis Bank often embeds opening/closing balance as rows inside the transaction
+        # table rather than as free-form text, so extract_text() misses them.
+        if not opening or not closing:
+            opening, closing = _balance_from_tables(pdf, opening, closing)
+
         meta = self._default_metadata()
         meta.account_number_masked = _axis_account(text)
         meta.account_holder = _axis_holder(text)
@@ -192,6 +193,44 @@ def _parse(table: list, header_idx: int, col_map: dict[str, int], warnings: list
         ))
 
     return rows
+
+
+def _balance_from_tables(
+    pdf: pdfplumber.PDF,
+    opening: str | None,
+    closing: str | None,
+) -> tuple[str | None, str | None]:
+    """
+    Scan every table on every page for rows whose description cell contains
+    "OPENING BALANCE" or "CLOSING BALANCE", and read the balance column value.
+    Returns the (possibly updated) opening and closing balance pair.
+    """
+    for page in pdf.pages:
+        for table in page.extract_tables():
+            h = AxisParser._find_header_row(table, _HEADER_KEYWORDS)
+            if h is None:
+                continue
+            col_map = _detect_axis_cols(table[h])
+            bal_idx = col_map.get("balance")
+            desc_idx = col_map.get("desc")
+            if bal_idx is None:
+                continue
+
+            for row in table[h + 1:]:
+                if not row or bal_idx >= len(row):
+                    continue
+                desc = str(row[desc_idx] or "").upper() if desc_idx is not None and desc_idx < len(row) else ""
+                bal = clean_amount(str(row[bal_idx] or "").strip())
+                if not bal:
+                    continue
+                if "OPENING BALANCE" in desc and not opening:
+                    opening = bal
+                    logger.debug("Opening balance found in table: %s", opening)
+                elif "CLOSING BALANCE" in desc and not closing:
+                    closing = bal
+                    logger.debug("Closing balance found in table: %s", closing)
+
+    return opening, closing
 
 
 def _pos(raw: str | None) -> bool:
