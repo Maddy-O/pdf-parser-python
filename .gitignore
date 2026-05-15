@@ -9,3 +9,6 @@ dist/
 *.egg-info/
 tests/fixtures/*.pdf
 tests/fixtures/*.xlsx
+debug_pdf.py
+inspect_pdf.py
+.claude/
