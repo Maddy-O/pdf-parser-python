@@ -1,0 +1,2 @@
+# Install the local library with OCR support, then these HTTP-layer deps
+-e ".[ocr,api]"
